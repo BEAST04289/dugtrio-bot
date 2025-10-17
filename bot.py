@@ -1,6 +1,7 @@
 import os
 import httpx
 import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -26,26 +27,24 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("📊 Check Sentiment", callback_data='menu_sentiment'),
-            InlineKeyboardButton("💧 New Pools (Demo)", callback_data='menu_new_pools')
+            InlineKeyboardButton("🔥 Top Projects", callback_data='menu_topprojects')
         ],
         [
-            InlineKeyboardButton("📸 Analyze PNL (Demo)", callback_data='menu_analyze_pnl'),
+            InlineKeyboardButton("📸 PNL Viewer", callback_data='menu_analyze_pnl'),
             InlineKeyboardButton("🧠 Track Wallet (Premium)", callback_data='menu_track_wallet')
         ],
         [
-            InlineKeyboardButton("🔥 Top Projects (Demo)", callback_data='menu_topprojects'),
-            InlineKeyboardButton("📅 Calendar (Demo)", callback_data='menu_calendar')
-        ],
-        [
-            InlineKeyboardButton("👑 Subscribe", callback_data='menu_subscribe'),
-            InlineKeyboardButton("💬 Send Feedback", callback_data='menu_feedback')
+            InlineKeyboardButton("👑 Subscribe", callback_data='menu_subscribe')
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_sentiment_keyboard() -> InlineKeyboardMarkup:
-    """Returns the secondary menu for quick sentiment checks."""
+def get_sentiment_keyboard(project_name: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Returns the secondary menu for sentiment checks.
+    If a project_name is provided, it adds a button to view 7-day history.
+    """
     keyboard = [
         [
             InlineKeyboardButton("SOL", callback_data='sentiment_Solana'),
@@ -54,9 +53,14 @@ def get_sentiment_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("PYTH", callback_data='sentiment_Pyth'),
             InlineKeyboardButton("BONK", callback_data='sentiment_Bonk')
-        ],
-        [InlineKeyboardButton("« Back to Main Menu", callback_data='menu_start')]
+        ]
     ]
+    if project_name:
+        keyboard.append([
+            InlineKeyboardButton(f"📈 7-Day History", callback_data=f'history_{project_name}')
+        ])
+
+    keyboard.append([InlineKeyboardButton("« Back to Main Menu", callback_data='menu_start')])
     return InlineKeyboardMarkup(keyboard)
 
 # --- Core Command & Callback Handlers ---
@@ -174,6 +178,7 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         await status_message.edit_text(
             text=reply,
+            reply_markup=get_sentiment_keyboard(project_name=project_name),
             reply_markup=get_sentiment_keyboard(),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
@@ -191,6 +196,7 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             reply = f"❌ Server error: Could not retrieve data ({e.response.status_code}). Please try again."
         await status_message.edit_text(
             text=reply,
+            reply_markup=get_sentiment_keyboard(project_name=project_name),
             reply_markup=get_sentiment_keyboard(),
             parse_mode=ParseMode.HTML
         )
@@ -198,51 +204,133 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reply = f"❌ An unexpected error occurred: {e}"
         await status_message.edit_text(
             text=reply,
+            reply_markup=get_sentiment_keyboard(project_name=project_name),
             reply_markup=get_sentiment_keyboard(),
             parse_mode=ParseMode.HTML
         )
 
 
-# --- "Demo Magic" Handlers (for impressive, simulated features) ---
+def create_bar(score: float, length: int = 10) -> str:
+    """Creates a text-based progress bar for sentiment scores (0-100)."""
+    score = max(0, min(100, score))  # Clamp score between 0 and 100
+    filled_len = int(length * score / 100)
+    return '█' * filled_len + '░' * (length - filled_len)
 
-async def new_pools_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    reply = (
-        "<b>🔥 New Pool Scanner (Demo)</b>\n\n"
-        "<b>1. $CLEO (Cleopatra)</b>\n"
-        "  - Volume (1h): <code>$78,430</code> ⬆️\n"
-        "  - Hype Score: <code>85/100</code>\n"
-        "  - Signal: <b>BOOM Alert 🚨</b>\n\n"
-        "<b>2. $GIZA (Pyramid)</b>\n"
-        "  - Volume (1h): <code>$45,120</code> ↗️\n"
-        "  - Hype Score: <code>62/100</code>\n"
-        "  - Signal: <i>Moderate interest</i>"
+
+async def sentiment_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetches and displays the 7-day sentiment history for a project."""
+    query = update.callback_query
+    await query.answer()
+
+    project_name = query.data.split('_')[1]
+
+    status_message = await query.message.edit_text(
+        f"<i>Fetching 7-day history for {project_name.capitalize()}...</i>",
+        parse_mode=ParseMode.HTML
     )
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(
-            reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML
+
+    try:
+        async with httpx.AsyncClient() as client:
+            api_url_history = f"https://dugtrio-backend.onrender.com/api/history/{project_name.capitalize()}"
+            response = await client.get(api_url_history, timeout=60.0)
+
+        response.raise_for_status()
+        history_data = response.json()
+
+        if not history_data:
+            reply = f"😕 No historical data found for <b>{project_name.upper()}</b>."
+        else:
+            reply_parts = [f"<b>📈 7-Day Sentiment History for {project_name.upper()}</b>\n"]
+            # Sort data by date just in case it's not sorted
+            history_data.sort(key=lambda x: x.get('date', ''))
+            for entry in history_data:
+                date_obj = datetime.strptime(entry.get('date'), '%Y-%m-%d')
+                day_name = date_obj.strftime('%a')
+                score = entry.get('average_sentiment_score', 0)
+                bar = create_bar(score)
+                reply_parts.append(f"<code>{day_name}: {bar} {score:.0f}%</code>")
+            reply = "\n".join(reply_parts)
+
+        await status_message.edit_text(
+            reply,
+            reply_markup=get_sentiment_keyboard(project_name=project_name),
+            parse_mode=ParseMode.HTML
         )
+
+    except httpx.HTTPStatusError as e:
+        reply = f"❌ Server error while fetching history ({e.response.status_code})."
+        await status_message.edit_text(reply, reply_markup=get_sentiment_keyboard(project_name=project_name), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        reply = f"❌ An unexpected error occurred while fetching history: {e}"
+        await status_message.edit_text(reply, reply_markup=get_sentiment_keyboard(project_name=project_name), parse_mode=ParseMode.HTML)
+
+
+# --- "Demo Magic" Handlers (for impressive, simulated features) ---
 
 
 async def analyze_pnl_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(
-            "📸 **PNL Analyzer (Demo)**\n\nPlease upload a screenshot of your PNL and use the caption <code>/pnl</code> to begin analysis.",
-            reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML
+    """Prompts the user to enter a project name for PNL data."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.message.edit_text(
+            "<b>📸 PNL Card Viewer</b>\n\n"
+            "Please enter the project name to view its PNL cards. "
+            "Usage:\n<code>/pnl [project_name]</code>\n\n"
+            "Example: <code>/pnl Solana</code>",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML
         )
 
 
 async def analyze_pnl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message and update.message.photo:
-        await update.message.reply_text("🔍 Analyzing your PNL screenshot...")
-        await asyncio.sleep(2)  # Simulate a delay for realism
-        reply = (
-            "<b>✅ PNL Analysis Complete</b>\n\n"
-            "<b>Detected Coin:</b> <code>$CLEO</code>\n"
-            "<b>Realized Profit:</b> 🚀 <code>+1,240%</code>\n"
-            "<b>Wallet Confidence:</b> High\n\n"
-            "<b>Signal:</b> This trade matches the pattern of a known high-performance wallet. Recommend tracking."
+    """Fetches and displays PNL cards for a given project."""
+    if not context.args:
+        await update.message.reply_text(
+            "Please specify a project. Usage: `/pnl Solana`"
         )
-        await update.message.reply_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+        return
+
+    project_name = context.args[0]
+    status_message = await update.message.reply_text(
+        f"<i>Fetching PNL cards for {project_name.capitalize()}...</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"https://dugtrio-backend.onrender.com/api/pnl/{project_name.capitalize()}", timeout=60.0)
+
+        response.raise_for_status()
+        pnl_cards = response.json()
+
+        if not pnl_cards:
+            reply = f"😕 No PNL cards found for <b>{project_name.upper()}</b>."
+        else:
+            reply_parts = [f"<b>📸 PNL Cards for {project_name.upper()}</b>\n"]
+            for i, card in enumerate(pnl_cards, 1):
+                # Assuming the API returns a list of objects with a 'url' field
+                card_url = card.get('url')
+                if card_url:
+                    reply_parts.append(f"{i}. <a href='{card_url}'>PNL Card #{i}</a>")
+            reply = "\n".join(reply_parts)
+
+        await status_message.edit_text(
+            reply,
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=False # Ensure links are clickable
+        )
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            reply = f"⚠️ No data found for <b>{project_name.upper()}</b>."
+        else:
+            reply = f"❌ Server error: Could not retrieve data ({e.response.status_code})."
+        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        reply = f"❌ An unexpected error occurred: {e}"
+        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
 
 
 async def track_wallet_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -281,21 +369,51 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def top_projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    reply = "<b>📊 Top Trending (Demo)</b>\n\n1. $SOL - 🔥 High sentiment..."
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+    """Fetches and displays the top trending projects from the backend."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+        status_message = await query.message.edit_text(
+            "<i>🔥 Fetching top trending projects...</i>",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        status_message = await update.message.reply_text(
+            "<i>🔥 Fetching top trending projects...</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # Note the change in the URL structure, pointing to the new endpoint
+            response = await client.get("https://dugtrio-backend.onrender.com/api/trending", timeout=60.0)
+
+        response.raise_for_status()
+        projects = response.json()
+
+        if not projects:
+            reply = "😕 No trending projects found at the moment."
+        else:
+            reply_parts = ["<b>🔥 Top Trending Projects</b>\n"]
+            for i, project in enumerate(projects, 1):
+                # Assuming the API returns a list of strings
+                reply_parts.append(f"{i}. ${project.upper()}")
+            reply = "\n".join(reply_parts)
+
+        await status_message.edit_text(
+            reply,
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+
+    except httpx.HTTPStatusError as e:
+        reply = f"❌ Server error: Could not retrieve data ({e.response.status_code}). Please try again."
+        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        reply = f"❌ An unexpected error occurred: {e}"
+        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
 
 
-async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    reply = "<b>📅 Upcoming Events (Demo)</b>\n\n• Oct 20: Hacker House - Singapore..."
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
-
-
-async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    reply = "💬 **Send Feedback (Demo)**\n\nWe'd love your ideas! Please reply to this message with any suggestions."
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
 
 
 # --- Main Bot Logic ---
@@ -313,21 +431,21 @@ def main() -> None:
     application.add_handler(CommandHandler("trackwallet", track_wallet_command))
 
     # This handler is specifically for the /pnl command when it's a caption on a photo
-    application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'/pnl'), analyze_pnl_command))
+    # This is now re-purposed for the text-based command, so we can remove the photo handler
+    # application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'/pnl'), analyze_pnl_command))
 
     # Register handlers for main menu button presses, using their callback_data
     application.add_handler(CallbackQueryHandler(start_command, pattern=r'^menu_start$'))
     application.add_handler(CallbackQueryHandler(sentiment_menu, pattern=r'^menu_sentiment$'))
-    application.add_handler(CallbackQueryHandler(new_pools_command, pattern=r'^menu_new_pools$'))
     application.add_handler(CallbackQueryHandler(analyze_pnl_prompt, pattern=r'^menu_analyze_pnl$'))
     application.add_handler(CallbackQueryHandler(track_wallet_prompt, pattern=r'^menu_track_wallet$'))
     application.add_handler(CallbackQueryHandler(subscribe_command, pattern=r'^menu_subscribe$'))
     application.add_handler(CallbackQueryHandler(top_projects_command, pattern=r'^menu_topprojects$'))
-    application.add_handler(CallbackQueryHandler(calendar_command, pattern=r'^menu_calendar$'))
-    application.add_handler(CallbackQueryHandler(feedback_command, pattern=r'^menu_feedback$'))
 
     # This handler catches all specific sentiment buttons (e.g., 'sentiment_Solana')
     application.add_handler(CallbackQueryHandler(sentiment_command, pattern=r'^sentiment_'))
+    # This handler catches the history button press
+    application.add_handler(CallbackQueryHandler(sentiment_history_command, pattern=r'^history_'))
 
     # Start the bot and wait for user input
     application.run_polling()
