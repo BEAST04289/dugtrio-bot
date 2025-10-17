@@ -99,31 +99,45 @@ async def sentiment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles both button presses and typed commands for sentiment analysis."""
+    """
+    Handles sentiment requests from both commands and buttons.
+    Sends a "digging" message and then edits it with the results for a better UX.
+    """
     project_name: Optional[str] = None
-    chat_id = update.effective_chat.id
+    query = update.callback_query
 
-    # Extract project name from a button press
-    if update.callback_query and update.callback_query.data:
-        await update.callback_query.answer()  # Acknowledge the button press
-        project_name = update.callback_query.data.split('_')[1]
-    # Extract project name from a typed command
+    # Determine the chat_id and how to respond (edit vs. send)
+    if query:
+        await query.answer()  # Acknowledge button press
+        project_name = query.data.split('_')[1]
+        # Edit the menu message to show the bot is working
+        status_message = await query.message.edit_text(
+            text=f"<i>⛏️ Digging for {project_name.capitalize()} sentiment...</i>",
+            parse_mode=ParseMode.HTML
+        )
     elif context.args:
         project_name = context.args[0]
-
-    if not project_name:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="Please choose a project or provide a name.", reply_markup=get_sentiment_keyboard()
+        # Send a new message since this was a typed command
+        status_message = await update.message.reply_text(
+            text=f"<i>⛏️ Digging for {project_name.capitalize()} sentiment...</i>",
+            parse_mode=ParseMode.HTML
         )
+    else:
+        # This case handles a user typing /sentiment without args
+        if update.message:
+            await update.message.reply_text(
+                "Please specify a project. Usage: `/sentiment Solana`",
+                reply_markup=get_sentiment_keyboard()
+            )
         return
 
-    # Acknowledge the request immediately so the user knows the bot is working.
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"<i>⛏️ Digging for {project_name.capitalize()} sentiment...\n\n(Note: The server may need a moment to start up on the first request.)</i>",
-        parse_mode=ParseMode.HTML
-    )
+    # If project_name is still None, something went wrong.
+    if not project_name:
+        await status_message.edit_text(
+            "⚠️ Could not determine the project. Please try again.",
+            reply_markup=get_sentiment_keyboard()
+        )
+        return
 
     try:
         async with httpx.AsyncClient() as client:
@@ -134,34 +148,58 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data = response.json()
         score = data.get('sentiment_score', 0)
         tweets = data.get('analyzed_tweet_count', 0)
+        top_tweet = data.get('top_tweet') # Safely get the top_tweet object
 
         mood = "🟢 Bullish" if score >= 70 else "🟡 Neutral" if score >= 50 else "🔴 Bearish"
 
-        reply = (
-            f"<b>📈 Sentiment for {project_name.upper()}</b>\n\n"
-            f"<b>Overall Mood:</b> {mood}\n"
-            f"<b>Sentiment Score:</b> <code>{score:.2f}%</code>\n"
+        # --- Build the Reply Message ---
+        reply_parts = [
+            f"<b>📈 Sentiment for {project_name.upper()}</b>\n",
+            f"<b>Overall Mood:</b> {mood}",
+            f"<b>Sentiment Score:</b> <code>{score:.2f}%</code>",
             f"<b>Based on:</b> <i>{tweets} recent tweets</i>"
+        ]
+
+        # Add the top tweet section if it exists
+        if top_tweet and isinstance(top_tweet, dict):
+            tweet_text = top_tweet.get('text', 'N/A')
+            tweet_author = top_tweet.get('author_username', 'N/A')
+            reply_parts.append(
+                f"\n<b>🔝 Top Tweet driving the score:</b>\n"
+                f"<i>\"{tweet_text}\"</i>\n"
+                f"- <b>Author:</b> @{tweet_author}"
+            )
+
+        reply = "\n".join(reply_parts)
+
+        await status_message.edit_text(
+            text=reply,
+            reply_markup=get_sentiment_keyboard(),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
         )
-        await context.bot.send_message(
-            chat_id=chat_id, text=reply,
-            reply_markup=get_sentiment_keyboard(), parse_mode=ParseMode.HTML
-        )
+
+        # After sending the main message, check for and send the photo if it exists
+        if top_tweet and isinstance(top_tweet, dict) and top_tweet.get('media_url'):
+            media_url = top_tweet['media_url']
+            await context.bot.send_photo(chat_id=status_message.chat_id, photo=media_url)
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             reply = f"⚠️ No data found for <b>{project_name.upper()}</b>. The tracker may not have this token yet."
         else:
             reply = f"❌ Server error: Could not retrieve data ({e.response.status_code}). Please try again."
-        await context.bot.send_message(
-            chat_id=chat_id, text=reply,
-            reply_markup=get_sentiment_keyboard(), parse_mode=ParseMode.HTML
+        await status_message.edit_text(
+            text=reply,
+            reply_markup=get_sentiment_keyboard(),
+            parse_mode=ParseMode.HTML
         )
     except Exception as e:
         reply = f"❌ An unexpected error occurred: {e}"
-        await context.bot.send_message(
-            chat_id=chat_id, text=reply,
-            reply_markup=get_sentiment_keyboard(), parse_mode=ParseMode.HTML
+        await status_message.edit_text(
+            text=reply,
+            reply_markup=get_sentiment_keyboard(),
+            parse_mode=ParseMode.HTML
         )
 
 
