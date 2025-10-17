@@ -179,6 +179,7 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await status_message.edit_text(
             text=reply,
             reply_markup=get_sentiment_keyboard(project_name=project_name),
+            reply_markup=get_sentiment_keyboard(),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
@@ -196,6 +197,7 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await status_message.edit_text(
             text=reply,
             reply_markup=get_sentiment_keyboard(project_name=project_name),
+            reply_markup=get_sentiment_keyboard(),
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
@@ -203,6 +205,7 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await status_message.edit_text(
             text=reply,
             reply_markup=get_sentiment_keyboard(project_name=project_name),
+            reply_markup=get_sentiment_keyboard(),
             parse_mode=ParseMode.HTML
         )
 
