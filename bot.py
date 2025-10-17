@@ -121,14 +121,14 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Acknowledge the request immediately so the user knows the bot is working.
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"<i>⛏️ Digging for {project_name.capitalize()} sentiment...</i>",
+        text=f"<i>⛏️ Digging for {project_name.capitalize()} sentiment...\n\n(Note: The server may need a moment to start up on the first request.)</i>",
         parse_mode=ParseMode.HTML
     )
 
     try:
         async with httpx.AsyncClient() as client:
             # Render's free tier can be slow to wake up, so a long timeout is essential.
-            response = await client.get(f"{API_URL}{project_name.capitalize()}", timeout=45.0)
+            response = await client.get(f"{API_URL}{project_name.capitalize()}", timeout=180.0)
 
         response.raise_for_status()  # Raise an error for bad responses (404, 502, etc.)
         data = response.json()
