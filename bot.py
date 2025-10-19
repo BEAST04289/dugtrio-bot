@@ -63,6 +63,26 @@ def get_sentiment_keyboard(project_name: Optional[str] = None) -> InlineKeyboard
     keyboard.append([InlineKeyboardButton("« Back to Main Menu", callback_data='menu_start')])
     return InlineKeyboardMarkup(keyboard)
 
+# Helper utilities to avoid edit_text
+async def send_new_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, disable_web_page_preview: Optional[bool] = None):
+    chat = update.effective_chat
+    if chat is None:
+        raise ValueError("Cannot determine chat_id from update; no effective chat available.")
+    chat_id = chat.id
+    return await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=disable_web_page_preview
+    )
+
+async def safe_delete_message(message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
 # --- Core Command & Callback Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -72,11 +92,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "<i>Your AI-powered analytics system for the Solana ecosystem is live.</i>\n\n"
         "Use the buttons below to navigate or type a command like <code>/sentiment Solana</code>."
     )
-    # If a button was clicked, edit the existing message. Otherwise, send a new one.
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(
-            welcome_message, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML
-        )
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        if query.message:
+            await safe_delete_message(query.message)
+        await send_new_message(update, context, welcome_message, reply_markup=get_main_menu_keyboard())
     elif update.message:
         await update.message.reply_text(
             welcome_message, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML
@@ -96,38 +117,42 @@ async def sentiment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "<code>/sentiment [project_name]</code>\n\n"
         "Example: <code>/sentiment WIF</code>"
     )
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(
-            message, reply_markup=get_sentiment_keyboard(), parse_mode=ParseMode.HTML
-        )
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        if query.message:
+            await safe_delete_message(query.message)
+        await send_new_message(update, context, message, reply_markup=get_sentiment_keyboard())
 
 
 async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handles sentiment requests from both commands and buttons.
-    Sends a "digging" message and then edits it with the results for a better UX.
+    Sends a "digging" message and then sends results as a new message.
     """
     project_name: Optional[str] = None
+    status_message = None
     query = update.callback_query
 
-    # Determine the chat_id and how to respond (edit vs. send)
     if query:
-        await query.answer()  # Acknowledge button press
-        project_name = query.data.split('_')[1]
-        # Edit the menu message to show the bot is working
-        status_message = await query.message.edit_text(
-            text=f"<i>⛏️ Digging for {project_name.capitalize()} sentiment...</i>",
-            parse_mode=ParseMode.HTML
+        await query.answer()
+        try:
+            if query.data:
+                project_name = query.data.split('_', 1)[1]
+        except Exception:
+            project_name = None
+        if query.message:
+            await safe_delete_message(query.message)
+        status_message = await send_new_message(
+            update, context, f"<i>⛏️ Digging for {project_name.capitalize() if project_name else 'project'} sentiment...</i>"
         )
-    elif context.args:
+    elif context.args and update.message:
         project_name = context.args[0]
-        # Send a new message since this was a typed command
         status_message = await update.message.reply_text(
             text=f"<i>⛏️ Digging for {project_name.capitalize()} sentiment...</i>",
             parse_mode=ParseMode.HTML
         )
     else:
-        # This case handles a user typing /sentiment without args
         if update.message:
             await update.message.reply_text(
                 "Please specify a project. Usage: `/sentiment Solana`",
@@ -135,36 +160,29 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
         return
 
-    # If project_name is still None, something went wrong.
     if not project_name:
-        await status_message.edit_text(
-            "⚠️ Could not determine the project. Please try again.",
-            reply_markup=get_sentiment_keyboard()
-        )
+        await send_new_message(update, context, "⚠️ Could not determine the project. Please try again.", reply_markup=get_sentiment_keyboard())
+        if status_message:
+            await safe_delete_message(status_message)
         return
 
     try:
         async with httpx.AsyncClient() as client:
-            # Render's free tier can be slow to wake up, so a long timeout is essential.
             response = await client.get(f"{API_URL}{project_name.capitalize()}", timeout=180.0)
-
-        response.raise_for_status()  # Raise an error for bad responses (404, 502, etc.)
+        response.raise_for_status()
         data = response.json()
         score = data.get('sentiment_score', 0)
         tweets = data.get('analyzed_tweet_count', 0)
-        top_tweet = data.get('top_tweet') # Safely get the top_tweet object
+        top_tweet = data.get('top_tweet')
 
         mood = "🟢 Bullish" if score >= 70 else "🟡 Neutral" if score >= 50 else "🔴 Bearish"
 
-        # --- Build the Reply Message ---
         reply_parts = [
             f"<b>📈 Sentiment for {project_name.upper()}</b>\n",
             f"<b>Overall Mood:</b> {mood}",
             f"<b>Sentiment Score:</b> <code>{score:.2f}%</code>",
             f"<b>Based on:</b> <i>{tweets} recent tweets</i>"
         ]
-
-        # Add the top tweet section if it exists
         if top_tweet and isinstance(top_tweet, dict):
             tweet_text = top_tweet.get('text', 'N/A')
             tweet_author = top_tweet.get('author_username', 'N/A')
@@ -173,41 +191,32 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f"<i>\"{tweet_text}\"</i>\n"
                 f"- <b>Author:</b> @{tweet_author}"
             )
-
         reply = "\n".join(reply_parts)
 
-        await status_message.edit_text(
-            text=reply,
+        await send_new_message(
+            update,
+            context,
+            reply,
             reply_markup=get_sentiment_keyboard(project_name=project_name),
-            reply_markup=get_sentiment_keyboard(),
-            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
 
-        # After sending the main message, check for and send the photo if it exists
-        if top_tweet and isinstance(top_tweet, dict) and top_tweet.get('media_url'):
+        if top_tweet and isinstance(top_tweet, dict) and top_tweet.get('media_url') and update.effective_chat:
             media_url = top_tweet['media_url']
-            await context.bot.send_photo(chat_id=status_message.chat_id, photo=media_url)
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=media_url)
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             reply = f"⚠️ No data found for <b>{project_name.upper()}</b>. The tracker may not have this token yet."
         else:
             reply = f"❌ Server error: Could not retrieve data ({e.response.status_code}). Please try again."
-        await status_message.edit_text(
-            text=reply,
-            reply_markup=get_sentiment_keyboard(project_name=project_name),
-            reply_markup=get_sentiment_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
+        await send_new_message(update, context, reply, reply_markup=get_sentiment_keyboard(project_name=project_name))
     except Exception as e:
         reply = f"❌ An unexpected error occurred: {e}"
-        await status_message.edit_text(
-            text=reply,
-            reply_markup=get_sentiment_keyboard(project_name=project_name),
-            reply_markup=get_sentiment_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
+        await send_new_message(update, context, reply, reply_markup=get_sentiment_keyboard(project_name=project_name))
+    finally:
+        if status_message:
+            await safe_delete_message(status_message)
 
 
 def create_bar(score: float, length: int = 10) -> str:
@@ -220,28 +229,32 @@ def create_bar(score: float, length: int = 10) -> str:
 async def sentiment_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and displays the 7-day sentiment history for a project."""
     query = update.callback_query
+    if not query:
+        return
+    
     await query.answer()
 
-    project_name = query.data.split('_')[1]
+    project_name = query.data.split('_', 1)[1] if query.data else None
 
-    status_message = await query.message.edit_text(
-        f"<i>Fetching 7-day history for {project_name.capitalize()}...</i>",
-        parse_mode=ParseMode.HTML
+    if query.message:
+        await safe_delete_message(query.message)
+
+    status_message = await send_new_message(
+        update, context, f"<i>Fetching 7-day history for {project_name.capitalize() if project_name else 'project'}...</i>"
     )
 
     try:
         async with httpx.AsyncClient() as client:
-            api_url_history = f"https://dugtrio-backend.onrender.com/api/history/{project_name.capitalize()}"
+            api_url_history = f"https://dugtrio-backend.onrender.com/api/history/{(project_name or '').capitalize()}"
             response = await client.get(api_url_history, timeout=60.0)
 
         response.raise_for_status()
         history_data = response.json()
 
         if not history_data:
-            reply = f"😕 No historical data found for <b>{project_name.upper()}</b>."
+            reply = f"😕 No historical data found for <b>{(project_name or 'PROJECT').upper()}</b>."
         else:
-            reply_parts = [f"<b>📈 7-Day Sentiment History for {project_name.upper()}</b>\n"]
-            # Sort data by date just in case it's not sorted
+            reply_parts = [f"<b>📈 7-Day Sentiment History for {(project_name or 'PROJECT').upper()}</b>\n"]
             history_data.sort(key=lambda x: x.get('date', ''))
             for entry in history_data:
                 date_obj = datetime.strptime(entry.get('date'), '%Y-%m-%d')
@@ -251,52 +264,56 @@ async def sentiment_history_command(update: Update, context: ContextTypes.DEFAUL
                 reply_parts.append(f"<code>{day_name}: {bar} {score:.0f}%</code>")
             reply = "\n".join(reply_parts)
 
-        await status_message.edit_text(
-            reply,
-            reply_markup=get_sentiment_keyboard(project_name=project_name),
-            parse_mode=ParseMode.HTML
+        await send_new_message(
+            update, context, reply, reply_markup=get_sentiment_keyboard(project_name=project_name)
         )
 
     except httpx.HTTPStatusError as e:
         reply = f"❌ Server error while fetching history ({e.response.status_code})."
-        await status_message.edit_text(reply, reply_markup=get_sentiment_keyboard(project_name=project_name), parse_mode=ParseMode.HTML)
+        await send_new_message(update, context, reply, reply_markup=get_sentiment_keyboard(project_name=project_name))
     except Exception as e:
         reply = f"❌ An unexpected error occurred while fetching history: {e}"
-        await status_message.edit_text(reply, reply_markup=get_sentiment_keyboard(project_name=project_name), parse_mode=ParseMode.HTML)
+        await send_new_message(update, context, reply, reply_markup=get_sentiment_keyboard(project_name=project_name))
+    finally:
+        if status_message:
+            await safe_delete_message(status_message)
 
 
 # --- "Demo Magic" Handlers (for impressive, simulated features) ---
-
 
 async def analyze_pnl_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompts the user to enter a project name for PNL data."""
     query = update.callback_query
     if query:
         await query.answer()
-        await query.message.edit_text(
+        if query.message:
+            await safe_delete_message(query.message)
+        await send_new_message(
+            update, context,
             "<b>📸 PNL Card Viewer</b>\n\n"
             "Please enter the project name to view its PNL cards. "
             "Usage:\n<code>/pnl [project_name]</code>\n\n"
             "Example: <code>/pnl Solana</code>",
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode=ParseMode.HTML
+            reply_markup=get_main_menu_keyboard()
         )
 
 
 async def analyze_pnl_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and displays PNL cards for a given project."""
     if not context.args:
-        await update.message.reply_text(
-            "Please specify a project. Usage: `/pnl Solana`"
-        )
+        if update.message:
+            await update.message.reply_text(
+                "Please specify a project. Usage: `/pnl Solana`"
+            )
         return
-
     project_name = context.args[0]
-    status_message = await update.message.reply_text(
-        f"<i>Fetching PNL cards for {project_name.capitalize()}...</i>",
-        parse_mode=ParseMode.HTML
-    )
-
+    status_message = None
+    if update.message:
+        status_message = await update.message.reply_text(
+            f"<i>Fetching PNL cards for {project_name.capitalize()}...</i>",
+            parse_mode=ParseMode.HTML
+        )
+    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(f"https://dugtrio-backend.onrender.com/api/pnl/{project_name.capitalize()}", timeout=60.0)
@@ -309,35 +326,37 @@ async def analyze_pnl_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             reply_parts = [f"<b>📸 PNL Cards for {project_name.upper()}</b>\n"]
             for i, card in enumerate(pnl_cards, 1):
-                # Assuming the API returns a list of objects with a 'url' field
                 card_url = card.get('url')
                 if card_url:
                     reply_parts.append(f"{i}. <a href='{card_url}'>PNL Card #{i}</a>")
             reply = "\n".join(reply_parts)
 
-        await status_message.edit_text(
-            reply,
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=False # Ensure links are clickable
+        await send_new_message(
+            update, context, reply, reply_markup=get_main_menu_keyboard(), disable_web_page_preview=False
         )
-
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             reply = f"⚠️ No data found for <b>{project_name.upper()}</b>."
         else:
             reply = f"❌ Server error: Could not retrieve data ({e.response.status_code})."
-        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+        await send_new_message(update, context, reply, reply_markup=get_main_menu_keyboard())
     except Exception as e:
         reply = f"❌ An unexpected error occurred: {e}"
-        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+        await send_new_message(update, context, reply, reply_markup=get_main_menu_keyboard())
+    finally:
+        if status_message:
+            await safe_delete_message(status_message)
 
 
 async def track_wallet_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(
-            "🧠 **Smart Wallet Tracker (Premium Demo)**\n\nPlease send the command:\n<code>/trackwallet [address]</code>",
-            reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML
+    query = update.callback_query
+    if query and query.message:
+        await query.answer()
+        await safe_delete_message(query.message)
+        await send_new_message(
+            update, context,
+            "<b>🧠 Smart Wallet Tracker (Premium Demo)</b>\n\nPlease send the command:\n<code>/trackwallet [address]</code>",
+            reply_markup=get_main_menu_keyboard()
         )
 
 
@@ -363,29 +382,28 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "<i>Thanks for supporting the alpha!</i>"
     )
     if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(
-            reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML
-        )
+        await update.callback_query.answer()
+        await safe_delete_message(update.callback_query.message)
+        await send_new_message(update, context, reply, reply_markup=get_main_menu_keyboard())
 
 
 async def top_projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and displays the top trending projects from the backend."""
     query = update.callback_query
-    if query:
+    if query and query.message:
         await query.answer()
-        status_message = await query.message.edit_text(
-            "<i>🔥 Fetching top trending projects...</i>",
-            parse_mode=ParseMode.HTML
-        )
-    else:
+        await safe_delete_message(query.message)
+        status_message = await send_new_message(update, context, "<i>🔥 Fetching top trending projects...</i>")
+    elif update.message:
         status_message = await update.message.reply_text(
             "<i>🔥 Fetching top trending projects...</i>",
             parse_mode=ParseMode.HTML
         )
+    else:
+        return
 
     try:
         async with httpx.AsyncClient() as client:
-            # Note the change in the URL structure, pointing to the new endpoint
             response = await client.get("https://dugtrio-backend.onrender.com/api/trending", timeout=60.0)
 
         response.raise_for_status()
@@ -396,31 +414,26 @@ async def top_projects_command(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             reply_parts = ["<b>🔥 Top Trending Projects</b>\n"]
             for i, project in enumerate(projects, 1):
-                # Assuming the API returns a list of strings
                 reply_parts.append(f"{i}. ${project.upper()}")
             reply = "\n".join(reply_parts)
 
-        await status_message.edit_text(
-            reply,
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-
+        await send_new_message(update, context, reply, reply_markup=get_main_menu_keyboard())
     except httpx.HTTPStatusError as e:
         reply = f"❌ Server error: Could not retrieve data ({e.response.status_code}). Please try again."
-        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+        await send_new_message(update, context, reply, reply_markup=get_main_menu_keyboard())
     except Exception as e:
         reply = f"❌ An unexpected error occurred: {e}"
-        await status_message.edit_text(reply, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
-
-
+        await send_new_message(update, context, reply, reply_markup=get_main_menu_keyboard())
+    finally:
+        if status_message:
+            await safe_delete_message(status_message)
 
 
 # --- Main Bot Logic ---
 
 def main() -> None:
     """Starts the bot and registers all the different ways a user can interact."""
-    # This builder will no longer show an error because we checked the token on line 17.
+    assert TELEGRAM_BOT_TOKEN is not None  # Type narrowing for type checker
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     print("✅ DugTrio Alpha Hunter is online...")
 
@@ -429,10 +442,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("sentiment", sentiment_command))
     application.add_handler(CommandHandler("trackwallet", track_wallet_command))
-
-    # This handler is specifically for the /pnl command when it's a caption on a photo
-    # This is now re-purposed for the text-based command, so we can remove the photo handler
-    # application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'/pnl'), analyze_pnl_command))
+    application.add_handler(CommandHandler("pnl", analyze_pnl_command))
 
     # Register handlers for main menu button presses, using their callback_data
     application.add_handler(CallbackQueryHandler(start_command, pattern=r'^menu_start$'))
@@ -442,12 +452,10 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(subscribe_command, pattern=r'^menu_subscribe$'))
     application.add_handler(CallbackQueryHandler(top_projects_command, pattern=r'^menu_topprojects$'))
 
-    # This handler catches all specific sentiment buttons (e.g., 'sentiment_Solana')
+    # Sentiment actions
     application.add_handler(CallbackQueryHandler(sentiment_command, pattern=r'^sentiment_'))
-    # This handler catches the history button press
     application.add_handler(CallbackQueryHandler(sentiment_history_command, pattern=r'^history_'))
 
-    # Start the bot and wait for user input
     application.run_polling()
 
 
